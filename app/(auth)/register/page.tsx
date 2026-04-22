@@ -7,6 +7,8 @@ import { Card } from '@/components/Card';
 import { useAuth } from '@/lib/hooks';
 import * as api from '@/lib/api';
 import { setApiKey } from '@/lib/storage';
+import axios from 'axios';
+import { API_URL, ENDPOINTS } from '@/lib/constants';
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -17,6 +19,7 @@ export default function RegisterPage() {
   const [otp, setOtp] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+  const [tempApiKey, setTempApiKey] = useState<string | null>(null);
 
   async function handleNameEmail() {
     if (!name.trim() || !email.trim()) {
@@ -26,10 +29,18 @@ export default function RegisterPage() {
     setIsLoading(true);
     setError('');
     try {
-      await api.sendOtp(email);
+      // Step 1: Register user with name to get API key
+      const registerRes = await axios.post(`${API_URL}${ENDPOINTS.REGISTER}`, { name });
+      const newApiKey = registerRes.data.api_key;
+      setTempApiKey(newApiKey);
+
+      // Step 2: Send OTP with the new API key
+      await axios.post(`${API_URL}${ENDPOINTS.SEND_OTP}`, { email }, {
+        headers: { 'X-Jarvis-Key': newApiKey }
+      });
       setStep('otp');
     } catch (err: any) {
-      setError(err.response?.data?.message || 'Failed to send OTP');
+      setError(err.response?.data?.error || 'Failed to send OTP');
     } finally {
       setIsLoading(false);
     }
@@ -43,12 +54,16 @@ export default function RegisterPage() {
     setIsLoading(true);
     setError('');
     try {
-      const { api_key } = await api.verifyOtp(email, otp);
-      setApiKey(api_key);
-      setApiKeyAndUser(api_key, { id: email, name, email });
+      // Step 3: Verify OTP with the temp API key
+      const verifyRes = await axios.post(`${API_URL}${ENDPOINTS.VERIFY_OTP}`, { email, otp }, {
+        headers: { 'X-Jarvis-Key': tempApiKey }
+      });
+      const finalApiKey = verifyRes.data.api_key || tempApiKey;
+      setApiKey(finalApiKey);
+      setApiKeyAndUser(finalApiKey, { id: email, name, email });
       router.push('/home');
     } catch (err: any) {
-      setError(err.response?.data?.message || 'Invalid OTP');
+      setError(err.response?.data?.error || 'Invalid OTP');
     } finally {
       setIsLoading(false);
     }
