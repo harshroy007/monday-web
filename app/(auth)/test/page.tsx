@@ -54,22 +54,35 @@ export default function TestPage() {
       let response;
 
       if (test.method === 'GET') {
-        response = await axios.get(`${API_URL}${test.path}`, {
+        response = await fetch(`${API_URL}${test.path}`, {
+          method: 'GET',
           headers: { 'X-Jarvis-Key': TEST_KEY },
         });
       } else {
-        response = await axios.post(`${API_URL}${test.path}`, test.body, {
-          headers: { 'X-Jarvis-Key': TEST_KEY },
+        response = await fetch(`${API_URL}${test.path}`, {
+          method: 'POST',
+          headers: {
+            'X-Jarvis-Key': TEST_KEY,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(test.body),
         });
       }
 
       const time = Date.now() - start;
-      newResult.status = 'success';
-      newResult.response = response.data;
-      newResult.time = time;
+      const data = await response.json();
+
+      if (response.ok) {
+        newResult.status = 'success';
+        newResult.response = data;
+        newResult.time = time;
+      } else {
+        newResult.status = 'error';
+        newResult.error = `HTTP ${response.status}: ${JSON.stringify(data)}`;
+      }
     } catch (err: any) {
       newResult.status = 'error';
-      newResult.error = err.message || 'Unknown error';
+      newResult.error = `${err.name}: ${err.message}`;
     }
 
     if (resultIndex >= 0) {
