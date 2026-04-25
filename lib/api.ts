@@ -17,7 +17,7 @@ function getClient(): AxiosInstance {
 
     apiClient.interceptors.request.use((config) => {
       const apiKey = getApiKey();
-      if (apiKey && config.url !== ENDPOINTS.REGISTER && config.url !== ENDPOINTS.RECOVER_ACCOUNT && config.url !== ENDPOINTS.SEND_OTP) {
+      if (apiKey && config.url !== ENDPOINTS.REGISTER && config.url !== ENDPOINTS.RECOVER_ACCOUNT) {
         config.headers['X-Jarvis-Key'] = apiKey;
       }
       return config;
