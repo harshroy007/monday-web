@@ -210,7 +210,6 @@ export default function RegisterPage() {
 
         {showRecoveryModal && (
           <RecoveryModal
-            isOpen={showRecoveryModal}
             onClose={() => setShowRecoveryModal(false)}
             onSuccess={handleRecoverySuccess}
           />
