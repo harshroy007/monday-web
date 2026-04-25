@@ -21,6 +21,7 @@ export default function AuthPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [resendCooldown, setResendCooldown] = useState(0);
+  const [devOtp, setDevOtp] = useState('');
   const otpRef = useRef<HTMLInputElement>(null);
 
   // Cooldown timer for resend
@@ -59,6 +60,7 @@ export default function AuthPage() {
         { headers: { 'X-Jarvis-Key': key } }
       );
       setIsReturning(otpRes.data.is_returning_user === true);
+      if (otpRes.data.otp) setDevOtp(otpRes.data.otp);
       setResendCooldown(60);
       setStep('otp');
     } catch (err: any) {
@@ -114,11 +116,12 @@ export default function AuthPage() {
     setError('');
     setLoading(true);
     try {
-      await axios.post(
+      const r = await axios.post(
         `${API_URL}/api/mobile/send_otp`,
         { email: email.trim().toLowerCase() },
         { headers: { 'X-Jarvis-Key': tempApiKey } }
       );
+      if (r.data.otp) setDevOtp(r.data.otp);
       setResendCooldown(60);
     } catch {
       setError('Failed to resend. Try again.');
@@ -194,6 +197,16 @@ export default function AuthPage() {
                   Enter the 6-digit code sent to <span className="text-[var(--color-text)]">{email}</span>.
                 </p>
               </div>
+              {devOtp && (
+                <div
+                  onClick={() => setOtp(devOtp)}
+                  className="flex items-center justify-between px-4 py-2.5 rounded-xl cursor-pointer border"
+                  style={{ backgroundColor: 'rgba(74,222,128,0.08)', borderColor: 'rgba(74,222,128,0.3)' }}
+                >
+                  <span className="text-xs text-[var(--color-green)]">Code ready (tap to fill)</span>
+                  <span className="text-lg font-mono font-bold text-[var(--color-green)] tracking-widest">{devOtp}</span>
+                </div>
+              )}
               <input
                 ref={otpRef}
                 type="text"
