@@ -1,221 +1,241 @@
 'use client';
 
-import { useState } from 'react';
+// Unified auth page — handles both new users and returning users.
+// Flow: email → OTP (2 steps, no password)
+// New users: register → send_otp → verify_otp → use temp api_key
+// Returning users: register (temp) → send_otp (sends to original account) → recover_account → original api_key
+
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button } from '@/components/Button';
-import { Card } from '@/components/Card';
-import { RecoveryModal } from '@/components/RecoveryModal';
-import { useAuth } from '@/lib/hooks';
-import { API_URL, ENDPOINTS } from '@/lib/constants';
 import axios from 'axios';
+import { API_URL } from '@/lib/constants';
+import { setApiKey, setUser } from '@/lib/storage';
 
-type RegisterStep = 'name' | 'email' | 'otp' | 'success';
-
-export default function RegisterPage() {
+export default function AuthPage() {
   const router = useRouter();
-  const { setApiKeyAndUser } = useAuth();
-  const [step, setStep] = useState<RegisterStep>('name');
-  const [name, setName] = useState('');
+  const [step, setStep] = useState<'email' | 'otp'>('email');
   const [email, setEmail] = useState('');
   const [otp, setOtp] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  const [isReturning, setIsReturning] = useState(false);
+  const [tempApiKey, setTempApiKey] = useState('');
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [tempApiKey, setTempApiKey] = useState<string | null>(null);
-  const [showRecoveryModal, setShowRecoveryModal] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const otpRef = useRef<HTMLInputElement>(null);
 
-  async function handleName() {
-    if (!name.trim()) {
-      setError('Please enter your name');
-      return;
-    }
-    setError('');
-    setStep('email');
-  }
+  // Cooldown timer for resend
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const t = setTimeout(() => setResendCooldown(c => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [resendCooldown]);
+
+  // Auto-focus OTP input when step changes
+  useEffect(() => {
+    if (step === 'otp') setTimeout(() => otpRef.current?.focus(), 100);
+  }, [step]);
 
   async function handleEmail() {
-    if (!email.trim()) {
-      setError('Please enter your email');
+    const e = email.trim().toLowerCase();
+    if (!e || !e.includes('@')) {
+      setError('Enter a valid email address.');
       return;
     }
-    setIsLoading(true);
     setError('');
+    setLoading(true);
     try {
-      const registerRes = await axios.post(`${API_URL}${ENDPOINTS.REGISTER}`, {
-        name,
-        email,
+      // Step 1: register to get a temp api_key (idempotent — same email always works)
+      const regRes = await axios.post(`${API_URL}/api/mobile/register`, {
+        name: 'Monday User',
+        email: e,
       });
-      setTempApiKey(registerRes.data.api_key);
+      const key = regRes.data.api_key;
+      setTempApiKey(key);
 
-      const otpRes = await axios.post(`${API_URL}/api/mobile/send_otp`, { email }, {
-        headers: { 'X-Jarvis-Key': registerRes.data.api_key }
-      });
-
-      if (otpRes.data.sent) {
-        setStep('otp');
-      }
+      // Step 2: send OTP — response tells us if this is a returning user
+      const otpRes = await axios.post(
+        `${API_URL}/api/mobile/send_otp`,
+        { email: e },
+        { headers: { 'X-Jarvis-Key': key } }
+      );
+      setIsReturning(otpRes.data.is_returning_user === true);
+      setResendCooldown(60);
+      setStep('otp');
     } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to send OTP');
+      setError(err.response?.data?.error || 'Something went wrong. Try again.');
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   }
 
   async function handleOtp() {
-    if (!otp.trim()) {
-      setError('Please enter the OTP code');
+    const code = otp.trim();
+    if (code.length !== 6) {
+      setError('Enter the 6-digit code from your email.');
       return;
     }
-    setIsLoading(true);
     setError('');
+    setLoading(true);
     try {
-      const verifyRes = await axios.post(`${API_URL}${ENDPOINTS.VERIFY_OTP}`, { email, otp }, {
-        headers: { 'X-Jarvis-Key': tempApiKey }
-      });
-      const finalApiKey = verifyRes.data.api_key || tempApiKey;
-      localStorage.setItem('api_key', finalApiKey);
-      setApiKeyAndUser(finalApiKey, { id: email, name, email });
-      setStep('success');
-      setTimeout(() => router.push('/home'), 1500);
+      let finalKey = tempApiKey;
+      let userName = 'Monday User';
+
+      if (isReturning) {
+        // Returning user: recover_account returns their ORIGINAL api_key
+        const res = await axios.post(`${API_URL}/api/mobile/recover_account`, {
+          email: email.trim().toLowerCase(),
+          otp: code,
+        });
+        if (!res.data.verified) throw new Error(res.data.error || 'Invalid code');
+        finalKey = res.data.api_key;
+      } else {
+        // New user: verify_otp marks email as verified, use temp key
+        const res = await axios.post(
+          `${API_URL}/api/mobile/verify_otp`,
+          { otp: code },
+          { headers: { 'X-Jarvis-Key': tempApiKey } }
+        );
+        if (!res.data.verified) throw new Error(res.data.error || 'Invalid code');
+      }
+
+      // Store auth
+      setApiKey(finalKey);
+      setUser({ email: email.trim().toLowerCase(), name: userName, id: finalKey });
+      router.push('/home');
     } catch (err: any) {
-      setError(err.response?.data?.error || 'Invalid OTP');
+      setError(err.response?.data?.error || err.message || 'Invalid code. Try again.');
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   }
 
-  async function handleRecoverySuccess(apiKey: string) {
-    setApiKeyAndUser(apiKey, { id: email, name, email });
-    router.push('/home');
+  async function handleResend() {
+    if (resendCooldown > 0) return;
+    setError('');
+    setLoading(true);
+    try {
+      await axios.post(
+        `${API_URL}/api/mobile/send_otp`,
+        { email: email.trim().toLowerCase() },
+        { headers: { 'X-Jarvis-Key': tempApiKey } }
+      );
+      setResendCooldown(60);
+    } catch {
+      setError('Failed to resend. Try again.');
+    } finally {
+      setLoading(false);
+    }
   }
-
-  const totalSteps = 3;
-  const currentStepNumber = {
-    name: 1,
-    email: 2,
-    otp: 3,
-    success: totalSteps,
-  }[step];
 
   return (
     <div className="min-h-screen bg-[var(--color-bg)] flex items-center justify-center p-4">
-      <Card className="w-full max-w-md">
-        <h1 className="text-2xl font-bold text-[var(--color-text)] mb-2">Welcome to Monday</h1>
-        <p className="text-[var(--color-muted)] mb-6">Your personal AI chief-of-staff</p>
-
-        {step !== 'success' && (
-          <div className="flex gap-2 mb-6 justify-center">
-            {Array.from({ length: totalSteps }).map((_, i) => (
-              <div
-                key={i}
-                className={`h-1 rounded-full transition-all ${
-                  i < currentStepNumber ? 'bg-[var(--color-purple)] w-6' : 'bg-[var(--color-border)] w-2'
-                }`}
-              />
-            ))}
+      <div className="w-full max-w-sm">
+        {/* Logo */}
+        <div className="text-center mb-10">
+          <div className="inline-flex items-center justify-center w-14 h-14 rounded-full bg-[var(--color-purple-dim)] border border-[var(--color-border-hi)] mb-4">
+            <span className="text-2xl font-bold text-[var(--color-purple)]">M</span>
           </div>
-        )}
+          <h1 className="text-2xl font-bold text-[var(--color-text)] tracking-tight">Monday</h1>
+          <p className="text-sm text-[var(--color-muted)] mt-1">The AI that gets smarter about you.</p>
+        </div>
 
-        {step === 'name' && (
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-[var(--color-text)] mb-2">
-                What should Monday call you?
-              </label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => { setName(e.target.value); setError(''); }}
-                placeholder="Your first name"
-                className="w-full px-4 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] placeholder-[var(--color-dim)]"
-                autoFocus
-              />
-              {error && <p className="text-sm text-red-500 mt-2">{error}</p>}
-            </div>
-            <Button onClick={handleName} disabled={!name.trim() || isLoading} className="w-full">
-              Continue
-            </Button>
-          </div>
-        )}
+        {/* Progress */}
+        <div className="flex gap-2 justify-center mb-8">
+          {(['email', 'otp'] as const).map((s, i) => (
+            <div
+              key={s}
+              className="h-1 rounded-full transition-all duration-300"
+              style={{
+                width: s === step ? 24 : 8,
+                backgroundColor: i <= (['email','otp'].indexOf(step)) ? 'var(--color-purple)' : 'var(--color-dim)',
+              }}
+            />
+          ))}
+        </div>
 
-        {step === 'email' && (
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-[var(--color-text)] mb-2">
-                Your email
-              </label>
-              <p className="text-xs text-[var(--color-muted)] mb-3">
-                We'll send you a verification code.
-              </p>
+        {/* Card */}
+        <div className="bg-[var(--color-surface)] rounded-2xl border border-[var(--color-border)] p-6">
+          {step === 'email' && (
+            <div className="space-y-4">
+              <div>
+                <h2 className="text-lg font-semibold text-[var(--color-text)] mb-1">Your email</h2>
+                <p className="text-xs text-[var(--color-muted)]">
+                  New or returning — just enter your email and we'll send a code.
+                </p>
+              </div>
               <input
                 type="email"
                 value={email}
-                onChange={(e) => { setEmail(e.target.value); setError(''); }}
+                onChange={e => { setEmail(e.target.value); setError(''); }}
+                onKeyDown={e => e.key === 'Enter' && !loading && handleEmail()}
                 placeholder="you@example.com"
-                className="w-full px-4 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] placeholder-[var(--color-dim)]"
                 autoFocus
+                autoComplete="email"
+                className="w-full px-4 py-3 rounded-xl bg-[var(--color-surface2)] border border-[var(--color-border)] text-[var(--color-text)] placeholder-[var(--color-dim)] focus:outline-none focus:border-[var(--color-purple)] transition-colors"
               />
-              {error && <p className="text-sm text-red-500 mt-2">{error}</p>}
+              {error && <p className="text-xs text-[var(--color-red)]">{error}</p>}
+              <button
+                onClick={handleEmail}
+                disabled={!email.trim() || loading}
+                className="w-full py-3 rounded-xl bg-[var(--color-purple)] text-white font-semibold text-sm disabled:opacity-40 hover:opacity-90 transition-opacity"
+              >
+                {loading ? 'Sending code…' : 'Continue'}
+              </button>
             </div>
-            <Button onClick={handleEmail} disabled={!email.trim() || isLoading} className="w-full">
-              {isLoading ? 'Sending code...' : 'Continue'}
-            </Button>
-            <Button onClick={() => setStep('name')} variant="secondary" className="w-full">
-              Back
-            </Button>
-            <button
-              onClick={() => setShowRecoveryModal(true)}
-              className="w-full text-sm text-[var(--color-purple)] hover:underline text-center py-2"
-            >
-              Can't recover your account?
-            </button>
-          </div>
-        )}
+          )}
 
-        {step === 'otp' && (
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-[var(--color-text)] mb-2">
-                Verification code
-              </label>
-              <p className="text-xs text-[var(--color-muted)] mb-3">
-                Check your email for a 6-digit code.
-              </p>
+          {step === 'otp' && (
+            <div className="space-y-4">
+              <div>
+                <h2 className="text-lg font-semibold text-[var(--color-text)] mb-1">
+                  {isReturning ? 'Welcome back' : 'Check your email'}
+                </h2>
+                <p className="text-xs text-[var(--color-muted)]">
+                  Enter the 6-digit code sent to <span className="text-[var(--color-text)]">{email}</span>.
+                </p>
+              </div>
               <input
+                ref={otpRef}
                 type="text"
+                inputMode="numeric"
                 value={otp}
-                onChange={(e) => { setOtp(e.target.value); setError(''); }}
+                onChange={e => { setOtp(e.target.value.replace(/\D/g, '').slice(0, 6)); setError(''); }}
+                onKeyDown={e => e.key === 'Enter' && !loading && otp.length === 6 && handleOtp()}
                 placeholder="000000"
                 maxLength={6}
-                className="w-full px-4 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] placeholder-[var(--color-dim)] text-center text-lg tracking-widest"
-                autoFocus
+                className="w-full px-4 py-3 rounded-xl bg-[var(--color-surface2)] border border-[var(--color-border)] text-[var(--color-text)] placeholder-[var(--color-dim)] text-center text-2xl tracking-widest font-mono focus:outline-none focus:border-[var(--color-purple)] transition-colors"
               />
-              {error && <p className="text-sm text-red-500 mt-2">{error}</p>}
+              {error && <p className="text-xs text-[var(--color-red)]">{error}</p>}
+              <button
+                onClick={handleOtp}
+                disabled={otp.length !== 6 || loading}
+                className="w-full py-3 rounded-xl bg-[var(--color-purple)] text-white font-semibold text-sm disabled:opacity-40 hover:opacity-90 transition-opacity"
+              >
+                {loading ? 'Verifying…' : 'Verify'}
+              </button>
+              <div className="flex justify-between items-center">
+                <button
+                  onClick={() => { setStep('email'); setOtp(''); setError(''); }}
+                  className="text-xs text-[var(--color-muted)] hover:text-[var(--color-text)] transition-colors"
+                >
+                  ← Change email
+                </button>
+                <button
+                  onClick={handleResend}
+                  disabled={resendCooldown > 0 || loading}
+                  className="text-xs text-[var(--color-purple)] disabled:opacity-40 hover:underline transition-opacity"
+                >
+                  {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : 'Resend code'}
+                </button>
+              </div>
             </div>
-            <Button onClick={handleOtp} disabled={!otp.trim() || isLoading} className="w-full">
-              {isLoading ? 'Verifying...' : 'Verify'}
-            </Button>
-            <Button onClick={() => setStep('email')} variant="secondary" className="w-full">
-              Back
-            </Button>
-          </div>
-        )}
+          )}
+        </div>
 
-        {step === 'success' && (
-          <div className="text-center space-y-4">
-            <div className="text-4xl">✨</div>
-            <p className="text-[var(--color-text)] font-medium">Welcome aboard, {name}!</p>
-            <p className="text-sm text-[var(--color-muted)]">Setting up your account...</p>
-          </div>
-        )}
-
-        {showRecoveryModal && (
-          <RecoveryModal
-            isOpen={showRecoveryModal}
-            onClose={() => setShowRecoveryModal(false)}
-            onSuccess={handleRecoverySuccess}
-          />
-        )}
-      </Card>
+        <p className="text-center text-[10px] text-[var(--color-dim)] mt-6 tracking-wider">
+          YOUR DATA · YOUR DATABASE · NEVER SHARED
+        </p>
+      </div>
     </div>
   );
 }
