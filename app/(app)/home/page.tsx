@@ -30,7 +30,11 @@ export default function HomePage() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef        = useRef<Blob[]>([]);
   const streamRef        = useRef<MediaStream | null>(null);
-  const silenceTimer     = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const audioCtxRef      = useRef<AudioContext | null>(null);
+  const analyserRef      = useRef<AnalyserNode | null>(null);
+  const vadFrameRef      = useRef<number | null>(null);
+  const silenceStartRef  = useRef<number | null>(null);
+  const hasSpeechRef     = useRef(false);
 
   const user = getUser();
 
@@ -54,11 +58,57 @@ export default function HomePage() {
 
   // Cleanup on unmount
   useEffect(() => {
-    return () => {
-      streamRef.current?.getTracks().forEach(t => t.stop());
-      if (silenceTimer.current) clearTimeout(silenceTimer.current);
-    };
+    return () => stopVAD();
   }, []);
+
+  function stopVAD() {
+    if (vadFrameRef.current) cancelAnimationFrame(vadFrameRef.current);
+    audioCtxRef.current?.close();
+    vadFrameRef.current = null;
+    audioCtxRef.current = null;
+    analyserRef.current = null;
+    streamRef.current?.getTracks().forEach(t => t.stop());
+  }
+
+  function startVAD(stream: MediaStream) {
+    const ctx      = new AudioContext();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.4;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    audioCtxRef.current  = ctx;
+    analyserRef.current  = analyser;
+    hasSpeechRef.current = false;
+    silenceStartRef.current = null;
+
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const SILENCE_THRESHOLD = 8;   // RMS below this = silent
+    const SILENCE_DELAY_MS  = 1800; // stop after 1.8s of silence post-speech
+
+    function tick() {
+      analyser.getByteTimeDomainData(data);
+      // RMS volume
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) {
+        const v = (data[i] - 128) / 128;
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / data.length) * 100;
+
+      if (rms > SILENCE_THRESHOLD) {
+        hasSpeechRef.current   = true;
+        silenceStartRef.current = null;
+      } else if (hasSpeechRef.current) {
+        if (!silenceStartRef.current) silenceStartRef.current = Date.now();
+        if (Date.now() - silenceStartRef.current > SILENCE_DELAY_MS) {
+          stopRecording();
+          return;
+        }
+      }
+      vadFrameRef.current = requestAnimationFrame(tick);
+    }
+    vadFrameRef.current = requestAnimationFrame(tick);
+  }
 
   async function startRecording() {
     setPermError('');
@@ -71,14 +121,12 @@ export default function HomePage() {
 
       const mr = new MediaRecorder(stream, { mimeType: getSupportedMimeType() });
       mediaRecorderRef.current = mr;
-
       mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
       mr.onstop = handleRecordingStop;
       mr.start(200);
-      setOrbState('recording');
 
-      // Auto-stop after 30s
-      silenceTimer.current = setTimeout(() => stopRecording(), 30000);
+      startVAD(stream);
+      setOrbState('recording');
     } catch (e: any) {
       setPermError('Microphone access denied. Allow mic in browser settings.');
       setOrbState('error');
@@ -86,9 +134,8 @@ export default function HomePage() {
   }
 
   function stopRecording() {
-    if (silenceTimer.current) clearTimeout(silenceTimer.current);
+    stopVAD();
     mediaRecorderRef.current?.stop();
-    streamRef.current?.getTracks().forEach(t => t.stop());
     setOrbState('processing');
   }
 
