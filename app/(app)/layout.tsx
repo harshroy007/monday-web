@@ -6,10 +6,11 @@ import Link from 'next/link';
 import { getApiKey } from '@/lib/storage';
 
 const NAV = [
-  { href: '/home',      label: 'Home',      icon: '◎' },
-  { href: '/chat',      label: 'Chat',      icon: '⌁' },
-  { href: '/dashboard', label: 'Intel',     icon: '⊞' },
-  { href: '/profile',   label: 'Profile',   icon: '○' },
+  { href: '/home',      label: 'Home',    icon: '◎' },
+  { href: '/chat',      label: 'Chat',    icon: '⌁' },
+  { href: '/dashboard', label: 'Intel',   icon: '⊞' },
+  { href: '/feed',      label: 'Feed',    icon: '≡' },
+  { href: '/profile',   label: 'Profile', icon: '○' },
 ];
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
